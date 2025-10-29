@@ -92,9 +92,9 @@ mod enum_header {
     use super::{ParseError, Result};
     use crate::header_parser::enum_header;
     use macro_rules_attribute::derive;
+    use paste::paste;
     use serde::Deserialize;
     use std::str::FromStr;
-    use paste::paste;
 
     macro_rules! TryFromRawAttribute {
         ($( #[$($attrs:tt)*] )*
@@ -253,7 +253,7 @@ mod enum_header {
                         Self::[< parse_ $impl >](value)
                     }
                 }
-                
+
                 impl Parse for Vec<$type> {
                     fn parse(value: raw_header::Attribute) -> Result<Self> {
                         Self::[< parse_ $impl _array >](value)
@@ -324,23 +324,7 @@ mod enum_header {
 }
 
 macro_rules! TryFromDataObject {
-    (muncher $(#[$field_attr:meta])*
-        $field_pub:vis $field_name:ident: Vec<$field_type:ty>,
-        $($tail:tt)*
-    ) => {
-        $(#[$field_attr])*
-        let $field_name = $field_name.into_iter().map(|it| it.try_into()).collect::<std::result::Result<_, _>>()?;
-        TryFromDataObject!{muncher $($tail)*}
-    };
-    (muncher $(#[$field_attr:meta])*
-        $field_pub:vis $field_name:ident: $field_type:ty,
-        $($tail:tt)*
-    ) => {
-        $(#[$field_attr])*
-        let $field_name = $field_name;
-        TryFromDataObject!{muncher $($tail)*}
-    };
-    (muncher) => {};
+    // Entrypoint. Transfers to the attribute muncher
     ($( #[$($attrs:tt)*] )*
     $pub:vis struct $struct_name:ident {
         $($tail:tt)*
@@ -352,6 +336,9 @@ macro_rules! TryFromDataObject {
             }
         }
     };
+    // Attribute muncher. Looks for the first custom attribute which gives
+    // the rename value. If none is found, it will find the last value which
+    // is the struct name
     ([custom($rename:ident) $($attrs:tt)*]
         $pub:vis struct $struct_name:ident {
         $($tail:tt)*
@@ -374,6 +361,7 @@ macro_rules! TryFromDataObject {
             }
         }
     };
+    // Main body of the macro
     ($rename:ident
     $pub:vis struct $struct_name:ident {
         $($tail:tt)*
@@ -384,8 +372,9 @@ macro_rules! TryFromDataObject {
             fn try_from(value: enum_header::DataObject) -> std::result::Result<Self, Self::Error> {
                 match value {
                     enum_header::DataObject::$rename(attributes) => {
-                        TryFromDataObject!{lets_and_match $rename attributes $($tail)*}
-                        TryFromDataObject!{muncher $($tail)*}
+                        TryFromDataObject!{match $rename attributes $($tail)*}
+                        TryFromDataObject!{lets $rename $($tail)*}
+                        TryFromDataObject!{vec_into $($tail)*}
                         TryFromDataObject!{output $($tail)*}
                     }
                     _ => Err(ParseError::UnexpectedDataObjectType),
@@ -393,7 +382,23 @@ macro_rules! TryFromDataObject {
             }
         }
     };
-    (lets_and_match $struct_name:ident $attrs:ident $($(#[$field_attr:meta])*
+    // Muncher that find any Vecs and runs into on all their values, then collects
+    // It would be easy to skip "primitive" Vec types but that'd cause this macro to baloon
+    (vec_into $(#[$field_attr:meta])*
+        $field_pub:vis $field_name:ident: Vec<$field_type:ty>,
+        $($($tail:tt)+)?
+    ) => {
+        let $field_name = $field_name.into_iter().map(|it| it.try_into()).collect::<std::result::Result<_, _>>()?;
+        $(TryFromDataObject!{vec_into $($tail)*})*
+    };
+    (vec_into $(#[$field_attr:meta])*
+        $field_pub:vis $field_name:ident: $field_type:ty,
+        $($($tail:tt)+)?
+    ) => {
+        $(TryFromDataObject!{vec_into $($tail)*})*
+    };
+    // Outputs the match block in one pass
+    (match $struct_name:ident $attrs:ident $($(#[$field_attr:meta])*
         $field_pub:vis $field_name:ident: $field_type:ty),*$(,)?
         ) => {
             $(let mut $field_name = None;)*
@@ -409,14 +414,38 @@ macro_rules! TryFromDataObject {
                     }
                 }
             }
-
-            $(let $field_name = $field_name.ok_or_else(|| {
+    };
+    // Double muncher that, for every field, iterates through its attributes
+    // and either outputs unwrap_or_default or ok_or_else, depending on whether
+    // serde(default) is found
+    (lets $struct_name:ident #[serde(default)] $(#[$($field_attrs:tt)+])*
+        $field_pub:vis $field_name:ident: $field_type:ty, $($($tail:tt)+)?
+        ) => {
+            let $field_name = $field_name.unwrap_or_default();
+            $(TryFromDataObject! {
+                lets $struct_name $($tail)*
+            })?
+    };
+    (lets $struct_name:ident #[$($field_attr:tt)+] $(#[$($field_attrs:tt)+])* $($tail:tt)*
+        ) => {
+            TryFromDataObject! {
+                lets $struct_name $(#[$($field_attrs)+])* $($tail)*
+            }
+    };
+    (lets $struct_name:ident
+        $field_pub:vis $field_name:ident: $field_type:ty, $($($tail:tt)+)?
+        ) => {
+            let $field_name = $field_name.ok_or_else(|| {
                 ParseError::MissingAttribute {
                     attribute: stringify!($field_name).to_owned(),
                     data_object: stringify!($struct_name).to_owned(),
                 }
-            })?;)*
+            })?;
+            $(TryFromDataObject! {
+                lets $struct_name $($tail)*
+            })?
     };
+    // Builds the output struct in one iteration
     (output $($(#[$field_attr:meta])*
         $field_pub:vis $field_name:ident: $field_type:ty),*$(,)?
         ) => {
@@ -457,7 +486,8 @@ pub struct WsiImage {
     pub dp_wavelet_quantizer_settings_per_color: Vec<DpWaveletQuantizerSettingsPerColor>,
     pub ufs_image_general_headers: Vec<UfsImageGeneralHeader>,
     pub ufs_image_block_header_templates: Vec<UfsImageBlockHeaderTemplate>,
-    // pub ufs_image_block_headers: Vec<UfsImageBlockHeader>,
+    #[serde(default)]
+    pub ufs_image_block_headers: Vec<UfsImageBlockHeader>,
     pub ufs_image_block_header_table: String,
 }
 
