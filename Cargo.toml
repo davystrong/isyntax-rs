@@ -1,0 +1,18 @@
+[package]
+name = "isyntax-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+base64 = "0.22.1"
+clap = { version = "4.5.50", features = ["derive"] }
+image = "0.25.8"
+rayon = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+# serde-xml-rs = "0.8.1"
+quick-xml = { version = "0.38.3", features = ["serialize"] }
+tqdm = "0.8.0"
+thiserror = "2"
+macro_rules_attribute = "0.2.2"
+paste = "1.0.15"
